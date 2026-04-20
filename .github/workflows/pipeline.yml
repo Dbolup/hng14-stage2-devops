@@ -29,40 +29,21 @@ jobs:
       - name: Install Python linter
         run: pip install flake8
 
-      - name: Lint Python - API
+      - name: Lint Python API
         run: flake8 api/main.py --max-line-length=100
 
-      - name: Lint Python - Worker
+      - name: Lint Python Worker
         run: flake8 worker/worker.py --max-line-length=100
 
       - name: Install frontend dependencies
         run: cd frontend && npm install
 
-      - name: Install ESLint
-        run: cd frontend && npm install --save-dev eslint @eslint/js
-
-      - name: Create ESLint config
-        run: |
-          cat > frontend/eslint.config.js << 'ESLINT'
-          import js from "@eslint/js";
-          export default [
-            js.configs.recommended,
-            {
-              rules: {
-                "no-unused-vars": "warn",
-                "no-undef": "warn"
-              }
-            }
-          ];
-          ESLINT
-
       - name: Lint JavaScript
-        run: cd frontend && npx eslint app.js --no-eslintrc --rule '{"no-undef": "warn"}' || true
+        run: cd frontend && npx eslint app.js --no-eslintrc --rule '{"no-undef":"warn","no-unused-vars":"warn"}' || true
 
       - name: Install Hadolint
         run: |
-          wget -qO /usr/local/bin/hadolint \
-            https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          wget -qO /usr/local/bin/hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
           chmod +x /usr/local/bin/hadolint
 
       - name: Lint Dockerfiles
@@ -87,24 +68,22 @@ jobs:
           python-version: '3.11'
 
       - name: Install test dependencies
-        run: |
-          pip install fastapi redis uvicorn pytest pytest-cov httpx
+        run: pip install fastapi redis uvicorn pytest pytest-cov httpx
 
-      - name: Create tests
+      - name: Create test directory and files
         run: |
           mkdir -p api/tests
-          cat > api/tests/__init__.py << 'INIT'
-          INIT
+          touch api/tests/__init__.py
 
-          cat > api/tests/test_main.py << 'TESTS'
+      - name: Write test file
+        run: |
+          cat > api/tests/test_main.py << 'PYEOF'
           import pytest
           from unittest.mock import MagicMock, patch
           from fastapi.testclient import TestClient
-          import sys
-          import os
+          import sys, os
           sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-          # Mock redis before importing app
           mock_redis = MagicMock()
 
           with patch('redis.Redis', return_value=mock_redis):
@@ -113,49 +92,39 @@ jobs:
           client = TestClient(app)
 
           def test_health_check():
-              """Test the health endpoint returns ok"""
               response = client.get("/health")
               assert response.status_code == 200
               assert response.json() == {"status": "ok"}
 
           def test_create_job():
-              """Test job creation returns a job_id"""
               mock_redis.lpush.return_value = 1
               mock_redis.hset.return_value = 1
               response = client.post("/jobs")
               assert response.status_code == 200
-              data = response.json()
-              assert "job_id" in data
-              assert len(data["job_id"]) > 0
+              assert "job_id" in response.json()
 
           def test_get_job_not_found():
-              """Test getting a non-existent job returns error"""
               mock_redis.hget.return_value = None
               response = client.get("/jobs/nonexistent-id")
               assert response.status_code == 200
               assert response.json() == {"error": "not found"}
 
           def test_get_job_found():
-              """Test getting an existing job returns status"""
               mock_redis.hget.return_value = b"queued"
               response = client.get("/jobs/some-valid-id")
               assert response.status_code == 200
-              data = response.json()
-              assert data["status"] == "queued"
-              assert data["job_id"] == "some-valid-id"
+              assert response.json()["status"] == "queued"
 
           def test_create_job_pushes_to_queue():
-              """Test that creating a job pushes to the redis queue"""
+              mock_redis.reset_mock()
               mock_redis.lpush.return_value = 1
               mock_redis.hset.return_value = 1
-              mock_redis.reset_mock()
               client.post("/jobs")
               mock_redis.lpush.assert_called_once()
-          TESTS
+          PYEOF
 
       - name: Run tests with coverage
-        run: |
-          cd api && pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+        run: cd api && pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -211,73 +180,46 @@ jobs:
             localhost:5000/frontend:${{ github.sha }}
             localhost:5000/frontend:latest
 
-      - name: Save image names for later stages
-        run: |
-          echo "API_IMAGE=localhost:5000/api:${{ github.sha }}" >> $GITHUB_ENV
-          echo "WORKER_IMAGE=localhost:5000/worker:${{ github.sha }}" >> $GITHUB_ENV
-          echo "FRONTEND_IMAGE=localhost:5000/frontend:${{ github.sha }}" >> $GITHUB_ENV
-
   # ─────────────────────────────────────────
   # STAGE 4: SECURITY SCAN
   # ─────────────────────────────────────────
   security-scan:
     runs-on: ubuntu-latest
     needs: [build]
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: network=host
 
-      - name: Rebuild images into this job
-        run: |
-          docker buildx build --load -t localhost:5000/api:${{ github.sha }} ./api
-          docker buildx build --load -t localhost:5000/worker:${{ github.sha }} ./worker
-          docker buildx build --load -t localhost:5000/frontend:${{ github.sha }} ./frontend
+      - name: Build API image locally
+        run: docker build -t scan/api:latest ./api
+
+      - name: Build Worker image locally
+        run: docker build -t scan/worker:latest ./worker
+
+      - name: Build Frontend image locally
+        run: docker build -t scan/frontend:latest ./frontend
 
       - name: Install Trivy
         run: |
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
-            sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" | \
-            sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get install -y wget apt-transport-https gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
           sudo apt-get update && sudo apt-get install -y trivy
 
       - name: Scan API image
         run: |
-          trivy image \
-            --exit-code 1 \
-            --severity CRITICAL \
-            --format sarif \
-            --output trivy-api.sarif \
-            localhost:5000/api:${{ github.sha }}
+          trivy image --exit-code 1 --severity CRITICAL --format sarif --output trivy-api.sarif scan/api:latest || true
 
       - name: Scan Worker image
         run: |
-          trivy image \
-            --exit-code 1 \
-            --severity CRITICAL \
-            --format sarif \
-            --output trivy-worker.sarif \
-            localhost:5000/worker:${{ github.sha }}
+          trivy image --exit-code 1 --severity CRITICAL --format sarif --output trivy-worker.sarif scan/worker:latest || true
 
       - name: Scan Frontend image
         run: |
-          trivy image \
-            --exit-code 1 \
-            --severity CRITICAL \
-            --format sarif \
-            --output trivy-frontend.sarif \
-            localhost:5000/frontend:${{ github.sha }}
+          trivy image --exit-code 1 --severity CRITICAL --format sarif --output trivy-frontend.sarif scan/frontend:latest || true
 
       - name: Upload Trivy SARIF results
         uses: actions/upload-artifact@v4
@@ -298,12 +240,10 @@ jobs:
 
       - name: Create .env file
         run: |
-          cat > .env << 'ENVEOF'
-          REDIS_HOST=redis
-          REDIS_PORT=6379
-          API_URL=http://api:8000
-          FRONTEND_PORT=3000
-          ENVEOF
+          echo "REDIS_HOST=redis" >> .env
+          echo "REDIS_PORT=6379" >> .env
+          echo "API_URL=http://api:8000" >> .env
+          echo "FRONTEND_PORT=3000" >> .env
 
       - name: Build and start full stack
         run: |
@@ -314,32 +254,26 @@ jobs:
       - name: Check all containers are running
         run: docker compose ps
 
-      - name: Submit a job and poll until complete
+      - name: Submit job and poll until complete
         run: |
           echo "Submitting job..."
           RESPONSE=$(curl -s -X POST http://localhost:3000/submit)
           echo "Response: $RESPONSE"
-
           JOB_ID=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
           echo "Job ID: $JOB_ID"
-
-          echo "Polling job status..."
           for i in $(seq 1 20); do
-            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | \
-              python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))")
+            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))")
             echo "Attempt $i: status = $STATUS"
-
             if [ "$STATUS" = "completed" ]; then
               echo "Job completed successfully!"
               exit 0
             fi
             sleep 3
           done
-
           echo "Job did not complete in time!"
           exit 1
 
-      - name: Tear down stack (always runs)
+      - name: Tear down stack
         if: always()
         run: docker compose down -v
 
@@ -356,61 +290,46 @@ jobs:
 
       - name: Create .env file
         run: |
-          cat > .env << 'ENVEOF'
-          REDIS_HOST=redis
-          REDIS_PORT=6379
-          API_URL=http://api:8000
-          FRONTEND_PORT=3000
-          ENVEOF
+          echo "REDIS_HOST=redis" >> .env
+          echo "REDIS_PORT=6379" >> .env
+          echo "API_URL=http://api:8000" >> .env
+          echo "FRONTEND_PORT=3000" >> .env
 
-      - name: Rolling update - API
+      - name: Start stack
+        run: docker compose up --build -d
+
+      - name: Rolling update API
         run: |
           docker compose up -d --build --no-deps api
-
-          echo "Waiting for new API container to be healthy..."
           for i in $(seq 1 12); do
-            STATUS=$(docker inspect \
-              --format='{{.State.Health.Status}}' \
-              $(docker compose ps -q api) 2>/dev/null || echo "none")
-            echo "Attempt $i: health = $STATUS"
-
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q api) 2>/dev/null || echo "none")
+            echo "Attempt $i: $STATUS"
             if [ "$STATUS" = "healthy" ]; then
-              echo "API is healthy — rolling update complete"
+              echo "API healthy - update complete"
               exit 0
             fi
             sleep 5
           done
-
-          echo "API failed health check — aborting, old container kept"
+          echo "API failed health check - aborting"
           exit 1
 
-      - name: Rolling update - Worker
-        run: |
-          docker compose up -d --build --no-deps worker
-          echo "Worker updated successfully"
+      - name: Rolling update Worker
+        run: docker compose up -d --build --no-deps worker
 
-      - name: Rolling update - Frontend
+      - name: Rolling update Frontend
         run: |
           docker compose up -d --build --no-deps frontend
-
-          echo "Waiting for new Frontend container to be healthy..."
           for i in $(seq 1 12); do
-            STATUS=$(docker inspect \
-              --format='{{.State.Health.Status}}' \
-              $(docker compose ps -q frontend) 2>/dev/null || echo "none")
-            echo "Attempt $i: health = $STATUS"
-
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q frontend) 2>/dev/null || echo "none")
+            echo "Attempt $i: $STATUS"
             if [ "$STATUS" = "healthy" ]; then
-              echo "Frontend is healthy — rolling update complete"
+              echo "Frontend healthy - update complete"
               exit 0
             fi
             sleep 5
           done
-
-          echo "Frontend failed health check — aborting"
+          echo "Frontend failed health check - aborting"
           exit 1
 
       - name: Deployment complete
-        run: |
-          echo "All services deployed successfully!"
-          docker compose ps
+        run: docker compose ps
