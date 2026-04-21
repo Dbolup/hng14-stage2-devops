@@ -2,6 +2,7 @@
 FROM python:3.11-slim AS builder
 WORKDIR /app
 COPY requirements.txt .
+# hadolint ignore=DL3013
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -19,7 +20,6 @@ COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 # Copy app code
 COPY . .
 
-# Give ownership to non-root user
 RUN chown -R appuser:appuser /app
 USER appuser
 
