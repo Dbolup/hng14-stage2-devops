@@ -43,15 +43,17 @@ jobs:
 
       - name: Lint JavaScript
         run: |
-          cd frontend && npx eslint app.js \
-            --no-eslintrc \
-            --rule '{"no-undef":"warn","no-unused-vars":"warn"}' || true
+          cd frontend
+          npx eslint@8 app.js --env node --env es2021 \
+            --rule '{"no-undef":"warn","no-unused-vars":"warn"}' \
+            --parser-options 'ecmaVersion:2021' || true
 
       - name: Install Hadolint
         run: |
-          wget -qO /usr/local/bin/hadolint \
-            https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
-          chmod +x /usr/local/bin/hadolint
+          curl -sL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64 \
+            -o hadolint
+          chmod +x hadolint
+          sudo mv hadolint /usr/bin/hadolint
 
       - name: Lint Dockerfiles
         run: |
@@ -214,8 +216,7 @@ jobs:
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
             | gpg --dearmor \
             | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] \
-            https://aquasecurity.github.io/trivy-repo/deb generic main" \
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
             | sudo tee /etc/apt/sources.list.d/trivy.list
           sudo apt-get update && sudo apt-get install -y trivy
 

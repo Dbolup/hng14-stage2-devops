@@ -5,14 +5,24 @@ import os
 
 app = FastAPI()
 
-r = redis.Redis(host=os.environ.get("REDIS_HOST", "redis"), port=int(os.environ.get("REDIS_PORT", 6379)))
+r = redis.Redis(
+    host=os.environ.get("REDIS_HOST", "redis"),
+    port=int(os.environ.get("REDIS_PORT", 6379))
+)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 
 @app.post("/jobs")
 def create_job():
     job_id = str(uuid.uuid4())
-    r.lpush("job", job_id)
+    r.lpush("jobs", job_id)
     r.hset(f"job:{job_id}", "status", "queued")
     return {"job_id": job_id}
+
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
@@ -20,8 +30,3 @@ def get_job(job_id: str):
     if not status:
         return {"error": "not found"}
     return {"job_id": job_id, "status": status.decode()}
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
